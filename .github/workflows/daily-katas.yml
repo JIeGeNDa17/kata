@@ -1,0 +1,76 @@
+name: Daily Katas
+
+on:
+  schedule:
+    - cron: "17 6 * * *"   # каждый день ~09:17 МСК
+  workflow_dispatch:
+    inputs:
+      count:
+        description: "Сколько PR смержить в этом запуске"
+        default: "100"
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  farm:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.FARM_TOKEN }}
+          fetch-depth: 0
+
+      - name: Create and merge daily batch
+        env:
+          GH_TOKEN: ${{ secrets.FARM_TOKEN }}
+          BATCH: ${{ github.event.inputs.count || '100' }}
+          TARGET: "1024"
+        run: |
+          set -e
+          git config user.name "JIeGeNDa17"
+          git config user.email "183653302+JIeGeNDa17@users.noreply.github.com"
+          REPO="${GITHUB_REPOSITORY}"
+
+          # текущее число смерженных PR по всем репо владельца
+          owner="${GITHUB_REPOSITORY_OWNER}"
+          total=$(gh search prs --author "$owner" --merged --json number --limit 1000 2>/dev/null | jq 'length' || echo 0)
+          echo "Текущий счёт смерженных PR: $total (цель $TARGET)"
+          if [ "$total" -ge "$TARGET" ]; then
+            echo "Цель достигнута — отключаю расписание."
+            gh workflow disable "Daily Katas" -R "$REPO" || true
+            exit 0
+          fi
+
+          # сколько сделать в этом прогоне (не перепрыгнуть цель)
+          remaining=$(( TARGET - total ))
+          batch=$BATCH
+          [ "$remaining" -lt "$batch" ] && batch=$remaining
+          echo "В этом запуске смержу: $batch"
+
+          merged=0
+          for i in $(seq 1 "$batch"); do
+            br="kata/auto-${GITHUB_RUN_ID}-$i"
+            git checkout -q main
+            git checkout -q -b "$br"
+            mkdir -p katas
+            echo "// kata run ${GITHUB_RUN_ID} #$i" > "katas/auto-${GITHUB_RUN_ID}-$i.js"
+            git add -A
+            git commit -q -m "Add kata exercise (auto $i)"
+            git push -q -u origin "$br"
+            gh pr create --title "Add kata exercise" --body "Ежедневная ката" --head "$br" --base main >/dev/null
+            for a in 1 2 3; do gh pr merge "$br" --merge --delete-branch >/dev/null 2>&1 && { merged=$((merged+1)); break; }; sleep 3; done
+            git checkout -q main
+            sleep 2
+          done
+          echo "Смержено в этом запуске: $merged"
+
+          # если после прогона достигли цели — выключаем расписание
+          total=$(gh search prs --author "$owner" --merged --json number --limit 1000 2>/dev/null | jq 'length' || echo 0)
+          echo "Новый счёт: $total"
+          if [ "$total" -ge "$TARGET" ]; then
+            echo "Цель достигнута — отключаю расписание."
+            gh workflow disable "Daily Katas" -R "$REPO" || true
+          fi
